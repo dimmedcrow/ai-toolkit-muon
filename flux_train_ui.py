@@ -266,7 +266,7 @@ train:
   gradient_accumulation_steps: 1
   gradient_checkpointing: true
   noise_scheduler: flowmatch 
-  optimizer: adamw8bit #options: prodigy, dadaptation, adamw, adamw8bit, lion, lion8bit
+    optimizer: adamw8bit #options: prodigy, dadaptation, adamw, adamw8bit, lion, lion8bit, muon
   train_text_encoder: false #probably doesn't work for flux
   train_unet: true
 '''
@@ -348,7 +348,7 @@ with gr.Blocks(theme=theme, css=css) as demo:
             lr = gr.Number(label="Learning Rate", value=4e-4, minimum=1e-6, maximum=1e-3, step=1e-6)
             rank = gr.Number(label="LoRA Rank", value=16, minimum=4, maximum=128, step=4)
             model_to_train = gr.Radio(["dev", "schnell"], value="dev", label="Model to train")
-            low_vram = gr.Checkbox(label="Low VRAM", value=True)
+            low_vram = gr.Checkbox(label="Low VRAM", value=False)
             with gr.Accordion("Even more advanced options", open=False):
                 use_more_advanced_options = gr.Checkbox(label="Use more advanced options", value=False)
                 more_advanced_options = gr.Code(config_yaml, language="yaml")

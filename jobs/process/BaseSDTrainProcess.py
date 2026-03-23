@@ -1604,6 +1604,27 @@ class BaseSDTrainProcess(BaseTrainProcess):
                 model_config_to_load.refiner_name_or_path = previous_refiner_save
                 self.load_training_state_from_metadata(previous_refiner_save)
 
+        cuda_visible_devices = os.environ.get('CUDA_VISIBLE_DEVICES', '<unset>')
+        torch_cuda_available = torch.cuda.is_available()
+        torch_cuda_device_count = torch.cuda.device_count() if torch_cuda_available else 0
+        current_cuda_index = 'n/a'
+        current_cuda_name = 'n/a'
+        if torch_cuda_available and torch_cuda_device_count > 0:
+            try:
+                current_cuda_index = str(torch.cuda.current_device())
+                current_cuda_name = torch.cuda.get_device_name(int(current_cuda_index))
+            except Exception:
+                current_cuda_index = 'unknown'
+                current_cuda_name = 'unknown'
+        print_acc(
+            "[Device Debug] "
+            f"accelerator.device={self.accelerator.device} | "
+            f"CUDA_VISIBLE_DEVICES={cuda_visible_devices} | "
+            f"torch.cuda.is_available={torch_cuda_available} | "
+            f"torch.cuda.device_count={torch_cuda_device_count} | "
+            f"current_cuda={current_cuda_index} ({current_cuda_name})"
+        )
+
         self.sd = ModelClass(
             # todo handle single gpu and multi gpu here
             # device=self.device,

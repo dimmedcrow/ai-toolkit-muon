@@ -20,6 +20,7 @@ k-diffusion
 open_clip_torch
 timm
 prodigyopt
+muon-optimizer
 controlnet_aux==0.0.10
 python-dotenv
 bitsandbytes

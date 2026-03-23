@@ -1,6 +1,96 @@
 import torch
 
 
+def _normalize_param_groups(params, default_lr):
+    if isinstance(params, (list, tuple)):
+        normalized_params = list(params)
+    else:
+        normalized_params = list(params)
+
+    if not normalized_params:
+        return []
+
+    if isinstance(normalized_params[0], dict):
+        param_groups = []
+        for group in normalized_params:
+            group_params = list(group.get('params', []))
+            if not group_params:
+                continue
+            param_groups.append({
+                'params': group_params,
+                'lr': group.get('lr', default_lr),
+            })
+        return param_groups
+
+    return [{
+        'params': normalized_params,
+        'lr': default_lr,
+    }]
+
+
+def _get_muon_optimizer(params, learning_rate, optimizer_params):
+    try:
+        from muon import MuonWithAuxAdam, SingleDeviceMuonWithAuxAdam
+    except ImportError:
+        raise ImportError("Please install muon-optimizer to use Muon optimizer -> pip install muon-optimizer")
+
+    param_groups = _normalize_param_groups(params, learning_rate)
+
+    # Muon is intended for GPU training. If CUDA is available, keep all trainable
+    # params on the active CUDA device to avoid accidentally running Muon on CPU.
+    if torch.cuda.is_available():
+        target_device = torch.device('cuda', torch.cuda.current_device())
+        for group in param_groups:
+            for param in group['params']:
+                if hasattr(param, 'device') and param.device != target_device:
+                    param.data = param.data.to(target_device)
+                    if param.grad is not None:
+                        param.grad = param.grad.to(target_device)
+
+    muon_momentum = optimizer_params.get('momentum', 0.95)
+    muon_lr = optimizer_params.get('muon_lr', 0.02)
+    adam_betas = optimizer_params.get('betas', (0.9, 0.95))
+    adam_eps = optimizer_params.get('eps', 1e-10)
+    weight_decay = optimizer_params.get('weight_decay', 0.0)
+
+    muon_param_groups = []
+    for group in param_groups:
+        muon_params = []
+        aux_adam_params = []
+
+        for param in group['params']:
+            if getattr(param, 'ndim', 0) >= 2:
+                muon_params.append(param)
+            else:
+                aux_adam_params.append(param)
+
+        if muon_params:
+            muon_param_groups.append({
+                'params': muon_params,
+                'lr': group['lr'] if group['lr'] != learning_rate else muon_lr,
+                'momentum': muon_momentum,
+                'weight_decay': weight_decay,
+                'use_muon': True,
+            })
+
+        if aux_adam_params:
+            muon_param_groups.append({
+                'params': aux_adam_params,
+                'lr': group['lr'],
+                'betas': adam_betas,
+                'eps': adam_eps,
+                'weight_decay': weight_decay,
+                'use_muon': False,
+            })
+
+    if not muon_param_groups:
+        raise ValueError('Muon optimizer received no parameters to optimize')
+
+    if torch.distributed.is_available() and torch.distributed.is_initialized() and torch.distributed.get_world_size() > 1:
+        return MuonWithAuxAdam(muon_param_groups)
+    return SingleDeviceMuonWithAuxAdam(muon_param_groups)
+
+
 def get_optimizer(
         params,
         optimizer_type='adam',
@@ -10,7 +100,9 @@ def get_optimizer(
     if optimizer_params is None:
         optimizer_params = {}
     lower_type = optimizer_type.lower()
-    if lower_type.startswith("dadaptation"):
+    if lower_type == 'muon':
+        optimizer = _get_muon_optimizer(params, learning_rate, optimizer_params)
+    elif lower_type.startswith("dadaptation"):
         # dadaptation optimizer does not use standard learning rate. 1 is the default value
         import dadaptation
         print("Using DAdaptAdam optimizer")

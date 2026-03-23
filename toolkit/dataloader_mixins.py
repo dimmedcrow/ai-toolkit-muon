@@ -1826,82 +1826,83 @@ class LatentCachingMixin:
 
             # use tqdm to show progress
             i = 0
-            for file_item in tqdm(self.file_list, desc=f'Caching latents{" to disk" if to_disk else ""}'):
-                file_item.is_caching_to_disk = to_disk
-                file_item.is_caching_to_memory = to_memory
-                file_item.latent_load_device = self.sd.device
+            with torch.no_grad():
+                for file_item in tqdm(self.file_list, desc=f'Caching latents{" to disk" if to_disk else ""}'):
+                    file_item.is_caching_to_disk = to_disk
+                    file_item.is_caching_to_memory = to_memory
+                    file_item.latent_load_device = self.sd.device
 
-                latent_path = file_item.get_latent_path(recalculate=True)
-                # check if it is saved to disk already
-                if os.path.exists(latent_path):
-                    if to_memory:
-                        # load it into memory
-                        state_dict = load_file(latent_path, device='cpu')
-                        file_item._encoded_latent = state_dict['latent'].to('cpu', dtype=self.sd.torch_dtype)
-                        if 'first_frame_latent' in state_dict:
-                            file_item._cached_first_frame_latent = state_dict['first_frame_latent'].to('cpu', dtype=self.sd.torch_dtype)
-                        if 'audio_latent' in state_dict:
-                            file_item._cached_audio_latent = state_dict['audio_latent'].to('cpu', dtype=self.sd.torch_dtype)
-                else:
-                    # not saved to disk, calculate
-                    # load the image first
-                    file_item.load_and_process_image(self.transform, only_load_latents=True)
-                    dtype = self.sd.torch_dtype
-                    device = self.sd.device_torch
-                    state_dict = OrderedDict()
-                    first_frame_latent = None
-                    audio_latent = None
-                    # add batch dimension
-                    try:
-                        imgs = file_item.tensor.unsqueeze(0).to(device, dtype=dtype)
-                        latent = self.sd.encode_images(imgs).squeeze(0)
+                    latent_path = file_item.get_latent_path(recalculate=True)
+                    # check if it is saved to disk already
+                    if os.path.exists(latent_path):
+                        if to_memory:
+                            # load it into memory
+                            state_dict = load_file(latent_path, device='cpu')
+                            file_item._encoded_latent = state_dict['latent'].to('cpu', dtype=self.sd.torch_dtype)
+                            if 'first_frame_latent' in state_dict:
+                                file_item._cached_first_frame_latent = state_dict['first_frame_latent'].to('cpu', dtype=self.sd.torch_dtype)
+                            if 'audio_latent' in state_dict:
+                                file_item._cached_audio_latent = state_dict['audio_latent'].to('cpu', dtype=self.sd.torch_dtype)
+                    else:
+                        # not saved to disk, calculate
+                        # load the image first
+                        file_item.load_and_process_image(self.transform, only_load_latents=True)
+                        dtype = self.sd.torch_dtype
+                        device = self.sd.device_torch
+                        state_dict = OrderedDict()
+                        first_frame_latent = None
+                        audio_latent = None
+                        # add batch dimension
+                        try:
+                            imgs = file_item.tensor.unsqueeze(0).to(device, dtype=dtype)
+                            latent = self.sd.encode_images(imgs).squeeze(0)
+                            if to_disk:
+                                state_dict['latent'] = latent.clone().detach().cpu()
+                        except Exception as e:
+                            print_acc(f"Error processing image: {file_item.path}")
+                            print_acc(f"Error: {str(e)}")
+                            raise e
+                        # do first frame
+                        if self.dataset_config.num_frames > 1 and self.dataset_config.do_i2v:
+                            frames = file_item.tensor.unsqueeze(0).to(device, dtype=dtype)
+                            if len(frames.shape) == 4:
+                                first_frames = frames
+                            elif len(frames.shape) == 5:
+                                first_frames = frames[:, 0]
+                            else:
+                                raise ValueError(f"Unknown frame shape {frames.shape}")
+                            first_frame_latent = self.sd.encode_images(first_frames).squeeze(0)
+                            if to_disk:
+                                state_dict['first_frame_latent'] = first_frame_latent.clone().detach().cpu()
+
+                        # audio
+                        if file_item.audio_data is not None:
+                            audio_latent = self.sd.encode_audio([file_item.audio_data]).squeeze(0)
+                            if to_disk:
+                                state_dict['audio_latent'] = audio_latent.clone().detach().cpu()
+
+                        # save_latent
                         if to_disk:
-                            state_dict['latent'] = latent.clone().detach().cpu()
-                    except Exception as e:
-                        print_acc(f"Error processing image: {file_item.path}")
-                        print_acc(f"Error: {str(e)}")
-                        raise e
-                    # do first frame
-                    if self.dataset_config.num_frames > 1 and self.dataset_config.do_i2v:
-                        frames = file_item.tensor.unsqueeze(0).to(device, dtype=dtype)
-                        if len(frames.shape) == 4:
-                            first_frames = frames
-                        elif len(frames.shape) == 5:
-                            first_frames = frames[:, 0]
-                        else:
-                            raise ValueError(f"Unknown frame shape {frames.shape}")
-                        first_frame_latent = self.sd.encode_images(first_frames).squeeze(0)
-                        if to_disk:
-                            state_dict['first_frame_latent'] = first_frame_latent.clone().detach().cpu()
-                    
-                    # audio
-                    if file_item.audio_data is not None:
-                        audio_latent = self.sd.encode_audio([file_item.audio_data]).squeeze(0)
-                        if to_disk:
-                            state_dict['audio_latent'] = audio_latent.clone().detach().cpu()
-                    
-                    # save_latent
-                    if to_disk:
-                        # metadata
-                        meta = get_meta_for_safetensors(file_item.get_latent_info_dict())
-                        os.makedirs(os.path.dirname(latent_path), exist_ok=True)
-                        save_file(state_dict, latent_path, metadata=meta)
+                            # metadata
+                            meta = get_meta_for_safetensors(file_item.get_latent_info_dict())
+                            os.makedirs(os.path.dirname(latent_path), exist_ok=True)
+                            save_file(state_dict, latent_path, metadata=meta)
 
-                    if to_memory:
-                        # keep it in memory
-                        file_item._encoded_latent = latent.to('cpu', dtype=self.sd.torch_dtype)
-                        if first_frame_latent is not None:
-                            file_item._cached_first_frame_latent = first_frame_latent.to('cpu', dtype=self.sd.torch_dtype)
-                        if audio_latent is not None:
-                            file_item._cached_audio_latent = audio_latent.to('cpu', dtype=self.sd.torch_dtype)
+                        if to_memory:
+                            # keep it in memory
+                            file_item._encoded_latent = latent.to('cpu', dtype=self.sd.torch_dtype)
+                            if first_frame_latent is not None:
+                                file_item._cached_first_frame_latent = first_frame_latent.to('cpu', dtype=self.sd.torch_dtype)
+                            if audio_latent is not None:
+                                file_item._cached_audio_latent = audio_latent.to('cpu', dtype=self.sd.torch_dtype)
 
-                    del imgs
-                    del latent
-                    del file_item.tensor
-                    file_item.cleanup()
+                        del imgs
+                        del latent
+                        del file_item.tensor
+                        file_item.cleanup()
 
-                file_item.is_latent_cached = True
-                i += 1
+                    file_item.is_latent_cached = True
+                    i += 1
 
             # restore device state
             self.sd.restore_device_state()
@@ -1975,59 +1976,64 @@ class TextEmbeddingCachingMixin:
             print_acc(" - Saving text embeddings to disk")
             
             did_move = False
+            try:
+                # use tqdm to show progress
+                i = 0
+                with torch.no_grad():
+                    for file_item in tqdm(self.file_list, desc='Caching text embeddings to disk'):
+                        file_item.text_embedding_load_device = self.sd.device
 
-            # use tqdm to show progress
-            i = 0
-            for file_item in tqdm(self.file_list, desc='Caching text embeddings to disk'):
-                file_item.latent_load_device = self.sd.device
+                        text_embedding_path = file_item.get_text_embedding_path(recalculate=True)
+                        # only process if not saved to disk
+                        if not os.path.exists(text_embedding_path):
+                            # load if not loaded
+                            if not did_move:
+                                self.sd.set_device_state_preset('cache_text_encoder')
+                                did_move = True
 
-                text_embedding_path = file_item.get_text_embedding_path(recalculate=True)
-                # only process if not saved to disk
-                if not os.path.exists(text_embedding_path):
-                    # load if not loaded
-                    if not did_move:
-                        self.sd.set_device_state_preset('cache_text_encoder')
-                        did_move = True
-                        
-                    if file_item.encode_control_in_text_embeddings:
-                        if file_item.control_path is None:
-                            raise Exception(f"Could not find a control image for {file_item.path} which is needed for this model")
-                        ctrl_img_list = []
-                        control_path_list = file_item.control_path
-                        if not isinstance(file_item.control_path, list):
-                            control_path_list = [control_path_list]
-                        for i in range(len(control_path_list)):
-                            try:
-                                img = Image.open(control_path_list[i]).convert("RGB")
-                                img = exif_transpose(img)
-                                # convert to 0 to 1 tensor
-                                img = (
-                                    TF.to_tensor(img)
-                                    .unsqueeze(0)
-                                    .to(self.sd.device_torch, dtype=self.sd.torch_dtype)
-                                )
-                                ctrl_img_list.append(img)
-                            except Exception as e:
-                                print_acc(f"Error: {e}")
-                                print_acc(f"Error loading control image: {control_path_list[i]}")
-                        
-                        if len(ctrl_img_list) == 0:
-                            ctrl_img = None
-                        elif not self.sd.has_multiple_control_images:
-                            ctrl_img = ctrl_img_list[0]
-                        else:
-                            ctrl_img = ctrl_img_list
-                        prompt_embeds: PromptEmbeds = self.sd.encode_prompt(file_item.caption, control_images=ctrl_img)
-                    else:
-                        prompt_embeds: PromptEmbeds = self.sd.encode_prompt(file_item.caption)
-                    # save it
-                    prompt_embeds.save(text_embedding_path)
-                    del prompt_embeds
-                file_item.is_text_embedding_cached = True
-                i += 1
-            # restore device state
-            # if did_move:
-            #     self.sd.restore_device_state()
+                            if file_item.encode_control_in_text_embeddings:
+                                if file_item.control_path is None:
+                                    raise Exception(f"Could not find a control image for {file_item.path} which is needed for this model")
+                                ctrl_img_list = []
+                                control_path_list = file_item.control_path
+                                if not isinstance(file_item.control_path, list):
+                                    control_path_list = [control_path_list]
+                                for control_idx in range(len(control_path_list)):
+                                    try:
+                                        img = Image.open(control_path_list[control_idx]).convert("RGB")
+                                        img = exif_transpose(img)
+                                        # convert to 0 to 1 tensor
+                                        img = (
+                                            TF.to_tensor(img)
+                                            .unsqueeze(0)
+                                            .to(self.sd.device_torch, dtype=self.sd.torch_dtype)
+                                        )
+                                        ctrl_img_list.append(img)
+                                    except Exception as e:
+                                        print_acc(f"Error: {e}")
+                                        print_acc(f"Error loading control image: {control_path_list[control_idx]}")
+
+                                if len(ctrl_img_list) == 0:
+                                    ctrl_img = None
+                                elif not self.sd.has_multiple_control_images:
+                                    ctrl_img = ctrl_img_list[0]
+                                else:
+                                    ctrl_img = ctrl_img_list
+                                prompt_embeds: PromptEmbeds = self.sd.encode_prompt(file_item.caption, control_images=ctrl_img)
+                            else:
+                                prompt_embeds: PromptEmbeds = self.sd.encode_prompt(file_item.caption)
+                            # save it
+                            prompt_embeds.save(text_embedding_path)
+                            del prompt_embeds
+                            if file_item.encode_control_in_text_embeddings:
+                                del ctrl_img_list
+                                if 'ctrl_img' in locals():
+                                    del ctrl_img
+                        file_item.is_text_embedding_cached = True
+                        i += 1
+            finally:
+                if did_move:
+                    self.sd.restore_device_state()
 
 
 class CLIPCachingMixin:

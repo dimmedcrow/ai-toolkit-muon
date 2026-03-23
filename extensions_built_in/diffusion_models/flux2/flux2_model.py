@@ -80,6 +80,12 @@ class Flux2Model(BaseModel):
         # do not resize control images
         self.use_raw_control_images = True
 
+    def _should_offload_transformer_for_te_load(self) -> bool:
+        """Return True to move transformer to CPU before loading text encoder.
+        Subclasses can override to keep the transformer on GPU when they handle
+        TE loading in a more memory-efficient way (e.g. CPU quantization)."""
+        return self.model_config.low_vram
+
     # static method to get the noise scheduler
     @staticmethod
     def get_train_scheduler():
@@ -177,7 +183,7 @@ class Flux2Model(BaseModel):
                 offload_percent=self.model_config.layer_offloading_transformer_percent,
             )
 
-        if self.model_config.low_vram:
+        if self._should_offload_transformer_for_te_load():
             self.print_and_status_update("Moving transformer to CPU")
             transformer.to("cpu")
 

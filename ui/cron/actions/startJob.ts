@@ -1,10 +1,69 @@
 import prisma from '../prisma';
 import { Job } from '@prisma/client';
-import { spawn } from 'child_process';
+import { spawn, spawnSync } from 'child_process';
 import path from 'path';
 import fs from 'fs';
 import { TOOLKIT_ROOT, getTrainingFolder, getHFToken } from '../paths';
 const isWindows = process.platform === 'win32';
+
+const normalizeGpuIds = (rawGpuIds: string | null | undefined): string | null => {
+  if (typeof rawGpuIds !== 'string') {
+    return null;
+  }
+
+  const ids = rawGpuIds
+    .split(',')
+    .map(id => id.trim())
+    .filter(id => id.length > 0 && /^\d+$/.test(id));
+
+  return ids.length > 0 ? ids.join(',') : null;
+};
+
+const getPythonCandidatePaths = (): string[] => {
+  const candidates: string[] = [];
+
+  if (fs.existsSync(path.join(TOOLKIT_ROOT, '.venv'))) {
+    candidates.push(
+      isWindows
+        ? path.join(TOOLKIT_ROOT, '.venv', 'Scripts', 'python.exe')
+        : path.join(TOOLKIT_ROOT, '.venv', 'bin', 'python')
+    );
+  }
+
+  if (fs.existsSync(path.join(TOOLKIT_ROOT, 'venv'))) {
+    candidates.push(
+      isWindows
+        ? path.join(TOOLKIT_ROOT, 'venv', 'Scripts', 'python.exe')
+        : path.join(TOOLKIT_ROOT, 'venv', 'bin', 'python')
+    );
+  }
+
+  candidates.push('python');
+  return candidates;
+};
+
+const hasCudaTorch = (pythonPath: string, env: NodeJS.ProcessEnv): boolean => {
+  try {
+    const probe = spawnSync(
+      pythonPath,
+      ['-c', 'import torch; print(int(torch.cuda.is_available()))'],
+      {
+        env,
+        encoding: 'utf8',
+        timeout: 10000,
+      }
+    );
+
+    if (probe.status !== 0) {
+      return false;
+    }
+
+    const output = `${probe.stdout || ''}`.trim();
+    return output.endsWith('1');
+  } catch {
+    return false;
+  }
+};
 
 const startAndWatchJob = (job: Job) => {
   // starts and watches the job asynchronously
@@ -52,22 +111,6 @@ const startAndWatchJob = (job: Job) => {
     // write the config file
     fs.writeFileSync(configPath, JSON.stringify(jobConfig, null, 2));
 
-    let pythonPath = 'python';
-    // use .venv or venv if it exists
-    if (fs.existsSync(path.join(TOOLKIT_ROOT, '.venv'))) {
-      if (isWindows) {
-        pythonPath = path.join(TOOLKIT_ROOT, '.venv', 'Scripts', 'python.exe');
-      } else {
-        pythonPath = path.join(TOOLKIT_ROOT, '.venv', 'bin', 'python');
-      }
-    } else if (fs.existsSync(path.join(TOOLKIT_ROOT, 'venv'))) {
-      if (isWindows) {
-        pythonPath = path.join(TOOLKIT_ROOT, 'venv', 'Scripts', 'python.exe');
-      } else {
-        pythonPath = path.join(TOOLKIT_ROOT, 'venv', 'bin', 'python');
-      }
-    }
-
     const runFilePath = path.join(TOOLKIT_ROOT, 'run.py');
     if (!fs.existsSync(runFilePath)) {
       console.error(`run.py not found at path: ${runFilePath}`);
@@ -84,9 +127,28 @@ const startAndWatchJob = (job: Job) => {
     const additionalEnv: any = {
       AITK_JOB_ID: jobID,
       CUDA_DEVICE_ORDER: 'PCI_BUS_ID',
-      CUDA_VISIBLE_DEVICES: `${job.gpu_ids}`,
       IS_AI_TOOLKIT_UI: '1',
     };
+
+    const gpuIds = normalizeGpuIds(job.gpu_ids as unknown as string);
+    if (gpuIds !== null) {
+      additionalEnv.CUDA_VISIBLE_DEVICES = gpuIds;
+    } else {
+      console.warn(`Job ${jobID} has invalid gpu_ids='${job.gpu_ids}'. Not setting CUDA_VISIBLE_DEVICES.`);
+    }
+
+    const pythonCandidates = getPythonCandidatePaths();
+    let pythonPath = pythonCandidates[0] || 'python';
+    if (gpuIds !== null) {
+      const cudaCapable = pythonCandidates.find(candidate => hasCudaTorch(candidate, {
+        ...process.env,
+        ...additionalEnv,
+      }));
+      if (cudaCapable) {
+        pythonPath = cudaCapable;
+      }
+    }
+    console.log(`Job ${jobID} python path: ${pythonPath}`);
 
     // HF_TOKEN
     const hfToken = await getHFToken();
